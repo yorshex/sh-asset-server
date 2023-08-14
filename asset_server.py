@@ -39,8 +39,6 @@ from xml.sax.saxutils import escape as xmlescape
 import re
 import gzip
 
-rm_re_pattern = re.compile(r'(\W|^)(mg|conf)Segment\(\s*(?:(["\'])((?:\\.|(?!\3)[^\n\\])*)\3)')
-
 def path_is_readable(path):
     return p.exists(path) and p.isfile(path) and os.access(path, os.R_OK)
 
@@ -139,14 +137,22 @@ class AdServerAssetReader:
 
         pv_string = f'&pv={pv}' if pv else ''
 
-        def _rm_repl(matchobj):
-            pref_space_char = matchobj.group(1)
-            func_pref = matchobj.group(2)
-            quote_char = matchobj.group(3)
-            seg_name_quoted = urlquote(matchobj.group(4))
-            return f'{pref_space_char}{func_pref}Segment({quote_char}http://{hostname}:8000/segment?type={seg_name_quoted}{pv_string}&filetype={quote_char}'
+        mgSegment_wrapper = b'''local function __shas_mgSegment_wrapper__(type, depth)
+    type = string.gsub(type, "[ !#$%%%%&'()*+,/:;=?@%%[%%]]", function(x)
+        return string.format("%%%%%%02X", string.byte(x))
+    end)
+    return mgSegment("http://%s:8000/segment?type=" .. type .. "%s&filetype=", depth)
+end
+''' % (bytes(hostname, 'utf-8'), bytes(pv_string, 'utf-8'))
 
-        return bytes(rm_re_pattern.sub(_rm_repl, room_content.decode('utf-8')), 'utf-8')
+        re_mgSeg = re.compile(r'(\W|^)mgSegment(\(| )')
+        def repl(matchobj):
+            group1 = matchobj.group(1)
+            group2 = matchobj.group(2)
+            return f'{group1}__shas_mgSegment_wrapper__{group2}'
+
+        return mgSegment_wrapper + bytes(re_mgSeg.sub(repl, room_content.decode('utf-8')), 'utf-8')
+
 
     def read_segment(self, segment_type : Optional[str], pv : Optional[int], hostname) -> Optional[bytes]:
         if segment_type is None:
