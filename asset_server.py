@@ -39,9 +39,9 @@ from xml.sax.saxutils import escape as xmlescape
 import re
 import gzip
 
-_rm_re_pattern = re.compile(r'(\W|^)(mg|conf)Segment\(\s*(?:(["\'])((?:\\.|(?!\3)[^\n\\])*)\3)')
+rm_re_pattern = re.compile(r'(\W|^)(mg|conf)Segment\(\s*(?:(["\'])((?:\\.|(?!\3)[^\n\\])*)\3)')
 
-def _path_is_readable(path):
+def path_is_readable(path):
     return p.exists(path) and p.isfile(path) and os.access(path, os.R_OK)
 
 class AdServerAssetReader:
@@ -55,10 +55,13 @@ class AdServerAssetReader:
     def _get_asset_path(self, path):
         return p.join(self.asset_dir, path + '.mp3')
 
+    def _template_exists(self, name):
+        (name is not None) and (name in self._templates.keys())
+
     def read_asset(self, path : str) -> Optional[bytes]:
         path = self._get_asset_path(path)
 
-        if not _path_is_readable(path):
+        if not path_is_readable(path):
             return
 
         with open(path, 'rb') as f:
@@ -67,7 +70,7 @@ class AdServerAssetReader:
     def update_templates(self):
         templates_path = self._get_asset_path('templates.xml')
 
-        if not _path_is_readable(templates_path):
+        if not path_is_readable(templates_path):
             self._templates = None
             self._templates_mtime = 0.0
             return
@@ -143,16 +146,17 @@ class AdServerAssetReader:
             seg_name_quoted = urlquote(matchobj.group(4))
             return f'{pref_space_char}{func_pref}Segment({quote_char}http://{hostname}:8000/segment?type={seg_name_quoted}{pv_string}&filetype={quote_char}'
 
-        return bytes(_rm_re_pattern.sub(_rm_repl, room_content.decode('utf-8')), 'utf-8')
+        return bytes(rm_re_pattern.sub(_rm_repl, room_content.decode('utf-8')), 'utf-8')
 
     def read_segment(self, segment_type : Optional[str], pv : Optional[int], hostname) -> Optional[bytes]:
-        segment_content = None
-        if segment_type is not None:
-            segment_content = self.read_asset(p.join('segments', segment_type + '.xml'))
-            if segment_content is None:
-                segment_content = self.read_asset(p.join('segments', segment_type + '.xml.gz'))
-                if segment_content is not None:
-                    segment_content = gzip.decompress(segment_content)
+        if segment_type is None:
+            return None
+
+        segment_content = self.read_asset(p.join('segments', segment_type + '.xml'))
+        if segment_content is None:
+            segment_content = self.read_asset(p.join('segments', segment_type + '.xml.gz'))
+            if segment_content is not None:
+                segment_content = gzip.decompress(segment_content)
 
         segment_root : ETree
         try:
@@ -166,9 +170,10 @@ class AdServerAssetReader:
             for iterator in segment_root.iter('box'), segment_root.iter('obstacle'):
                 for obj in iterator:
                     template_name = obj.get('template')
-                    if (template_name is not None) and (template_name in self._templates.keys()):
-                        del obj.attrib['template']
-                        obj.attrib = {**self._templates[template_name], **obj.attrib}
+                    if not self._template_exists(template_name):
+                        continue
+                    del obj.attrib['template']
+                    obj.attrib = {**self._templates[template_name], **obj.attrib}
 
         pv_string = f'&pv={pv}' if pv else ''
 
@@ -178,7 +183,7 @@ class AdServerAssetReader:
                 if obstacle_type is None:
                     continue
                 obstacle_path = p.join('obstacles', obstacle_type + '.lua')
-                if _path_is_readable(self._get_asset_path(obstacle_path)):
+                if path_is_readable(self._get_asset_path(obstacle_path)):
                     type_quoted = urlquote(obstacle_type)
                     obj.attrib['type'] = f'http://{hostname}:8000/obstacle?type={type_quoted}{pv_string}&ignore='
                 else:
@@ -195,6 +200,8 @@ class AdServerAssetReader:
         return obstacle_content
 
 asset_reader : AdServerAssetReader
+
+
 
 class HTTPResponse:
     def __init__(self, status:int, headers:dict[str, str]={}, content:bytes=b''):
@@ -215,6 +222,8 @@ class HTTPResponse:
             {'Content-Type': 'text/html'},
             bytes('<html><head><title>404 Not Found</title></head><body><h1>404 Not Found</h1><p><i>Smash Hit level server</i></p></body></html>', 'utf-8'))
 
+
+
 class AdRequestHandler(BaseHTTPRequestHandler):
     def _send_response(self, response:HTTPResponse):
         self.send_response(response.status)
@@ -223,6 +232,11 @@ class AdRequestHandler(BaseHTTPRequestHandler):
             self.send_header(key, response.headers[key])
         self.end_headers()
         self.wfile.write(response.content)
+
+    def _conditional_response(self, content : Optional[bytes], content_type : str):
+        if content is None:
+            return self._send_response(HTTPResponse.not_found())
+        return self._send_response(HTTPResponse.ok({'Content-Type': content_type}, content))
 
     def _get_query(self, name:str) -> Optional[str]:
         if not name in self._queries.keys():
@@ -235,59 +249,31 @@ class AdRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             return None
 
-    def _do_level_request(self):
-        level_content = asset_reader.read_level(self._get_query('type'), self._get_pv(), self._hostname)
-        if level_content is None:
-            self._send_response(HTTPResponse.not_found())
-            return
-        self._send_response(HTTPResponse.ok({'Content-Type': 'text/xml'}, level_content))
-
-    def _do_room_request(self):
-        room_content = asset_reader.read_room(self._get_query('type'), self._get_pv(), self._hostname)
-        if room_content is None:
-            self._send_response(HTTPResponse.not_found())
-            return
-        self._send_response(HTTPResponse.ok({'Content-Type': 'text/plain'}, room_content))
-
-    def _do_segment_request(self):
-        if self._get_query('filetype') == '.xml':
-            segment_content = asset_reader.read_segment(self._get_query('type'), self._get_pv(), self._hostname)
-            if segment_content is None:
-                self._send_response(HTTPResponse.not_found())
-                return
-            self._send_response(HTTPResponse.ok({'Content-Type': 'text/xml'}, segment_content))
-        elif self._get_query('filetype') == '.mesh':
-            segment_content = asset_reader.read_segment_mesh(self._get_query('type'))
-            if segment_content is None:
-                self._send_response(HTTPResponse.not_found())
-                return
-            self._send_response(HTTPResponse.ok({'Content-Type': 'application/octet-stream'}, segment_content))
-        else:
-            self._send_response(HTTPResponse.not_found())
-
-    def _do_obstacle_request(self):
-        obstacle_content = asset_reader.read_obstacle(self._get_query('type'))
-        if obstacle_content is None:
-            self._send_response(HTTPResponse.not_found())
-            return
-        self._send_response(HTTPResponse.ok({'Content-Type': 'text/plain'}, obstacle_content))
 
     def do_GET(self):
         self._url = urlparse(self.path)
         self._hostname = self.headers['Host'].split(':')[0]
         self._queries = parse_url_qs(self._url.query)
+        self._pv = self._get_pv()
 
         match urljoin('/', self._url.path):
             case '/level':
-                self._do_level_request()
+                self._conditional_response(asset_reader.read_level(self._get_query('type'), self._pv, self._hostname), 'text/xml')
             case '/room':
-                self._do_room_request()
+                self._conditional_response(asset_reader.read_room(self._get_query('type'), self._pv, self._hostname), 'text/plain')
             case '/segment':
-                self._do_segment_request()
+                if self._get_query('filetype') == '.xml':
+                    self._conditional_response(asset_reader.read_segment(self._get_query('type'), self._pv, self._hostname), 'text/xml')
+                elif self._get_query('filetype') == '.mesh':
+                    self._conditional_response(asset_reader.read_segment_mesh(self._get_query('type')), 'application/octet-stream')
+                else:
+                    self._send_response(HTTPResponse.not_found())
             case '/obstacle':
-                self._do_obstacle_request()
+                self._conditional_response(asset_reader.read_obstacle(self._get_query('type')), 'text/plain')
             case _:
                 self._send_response(HTTPResponse.not_found())
+
+
 
 def runAdServer(server_class, handler_class, asset_dir : str, default_level : Optional[str]):
     global asset_reader
@@ -302,6 +288,8 @@ def runAdServer(server_class, handler_class, asset_dir : str, default_level : Op
     except Exception as e:
         print("Smash Hit level server is down:\n" + e)
 
+
+
 def main():
     parser = ArgumentParser(prog='python ./levelserver.py', description='Smash Hit Assets Server by yorshex - SH server compatible with Shatter\'s quick test client')
     parser.add_argument('asset_dir', metavar='assets-directory', help='SH asset directory')
@@ -313,5 +301,9 @@ def main():
 
     runAdServer(HTTPServer, AdRequestHandler, p.join(os.getcwd(), args.asset_dir), args.default_level)
 
+
+
 if __name__ == '__main__':
     main()
+else:
+    raise Exception("Asset server isn't a library")
