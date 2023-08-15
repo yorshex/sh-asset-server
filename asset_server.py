@@ -314,6 +314,8 @@ def runAdServer(server_class, handler_class, asset_dir : str, default_level : Op
         server.serve_forever()
     except Exception as e:
         print("Smash Hit level server is down:\n" + e)
+    except KeyboardInterrupt:
+        print("Exiting...")
 
 
 
