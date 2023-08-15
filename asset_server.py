@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+
+
 '''
 Copyright (c) 2023 Maxim "yorshex" Ershov
 
@@ -20,6 +22,8 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 '''
 
+
+
 from argparse import ArgumentParser
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -35,17 +39,24 @@ from typing import Optional
 
 # for asset reading
 import xml.etree.ElementTree as ETree
-from xml.sax.saxutils import escape as xmlescape
+#from xml.sax.saxutils import escape as xmlescape
 import re
 import gzip
+
+
+
+re_mgSeg = re.compile(r'(\W|^)mgSegment(\W|$)')
 
 def path_is_readable(path):
     return p.exists(path) and p.isfile(path) and os.access(path, os.R_OK)
 
+
+
 class AdServerAssetReader:
-    def __init__(self, asset_dir : str, default_level : Optional[str]):
+    def __init__(self, asset_dir : str, default_level : Optional[str], do_obstacle_testing : bool):
         self.asset_dir : str = asset_dir
         self.default_level : Optional[str] = default_level
+        self.do_obstacle_loading : bool = do_obstacle_testing
         self._templates : Optional[dict[str, dict[str, str]]] = None
         self._templates_mtime : float = 0.0
         self.update_templates()
@@ -56,6 +67,7 @@ class AdServerAssetReader:
     def _template_exists(self, name):
         (name is not None) and (name in self._templates.keys())
 
+
     def read_asset(self, path : str) -> Optional[bytes]:
         path = self._get_asset_path(path)
 
@@ -64,6 +76,7 @@ class AdServerAssetReader:
 
         with open(path, 'rb') as f:
             return f.read()
+
 
     def update_templates(self):
         templates_path = self._get_asset_path('templates.xml')
@@ -99,6 +112,7 @@ class AdServerAssetReader:
             properties : dict[str, str] = properties_el.attrib
             self._templates[template_name] = properties
 
+
     def read_level(self, level_type : Optional[str], pv : Optional[int], hostname) -> Optional[bytes]:
         if level_type is None:
             if self.default_level is None:
@@ -127,6 +141,7 @@ class AdServerAssetReader:
 
         return ETree.tostring(level_root, encoding='utf-8', method='xml')
 
+
     def read_room(self, room_type : Optional[str], pv : Optional[int], hostname) -> Optional[bytes]:
         if room_type is None:
             return
@@ -145,7 +160,6 @@ class AdServerAssetReader:
 end
 ''' % (bytes(hostname, 'utf-8'), bytes(pv_string, 'utf-8'))
 
-        re_mgSeg = re.compile(r'(\W|^)mgSegment(\(| )')
         def repl(matchobj):
             group1 = matchobj.group(1)
             group2 = matchobj.group(2)
@@ -156,13 +170,16 @@ end
 
     def read_segment(self, segment_type : Optional[str], pv : Optional[int], hostname) -> Optional[bytes]:
         if segment_type is None:
-            return None
+            return
 
         segment_content = self.read_asset(p.join('segments', segment_type + '.xml'))
         if segment_content is None:
             segment_content = self.read_asset(p.join('segments', segment_type + '.xml.gz'))
             if segment_content is not None:
                 segment_content = gzip.decompress(segment_content)
+
+        if segment_content is None:
+            return
 
         segment_root : ETree
         try:
@@ -189,7 +206,7 @@ end
                 if obstacle_type is None:
                     continue
                 obstacle_path = p.join('obstacles', obstacle_type + '.lua')
-                if path_is_readable(self._get_asset_path(obstacle_path)):
+                if self.do_obstacle_loading and path_is_readable(self._get_asset_path(obstacle_path)):
                     type_quoted = urlquote(obstacle_type)
                     obj.attrib['type'] = f'http://{hostname}:8000/obstacle?type={type_quoted}{pv_string}&ignore='
                 else:
@@ -197,13 +214,17 @@ end
 
         return ETree.tostring(segment_root, encoding='utf-8', method='xml')
 
+
     def read_segment_mesh(self, segment_type : Optional[str]) -> Optional[bytes]:
         segment_content = self.read_asset(p.join('segments', segment_type + '.mesh'))
         return segment_content
 
+
     def read_obstacle(self, obstacle_type) -> Optional[bytes]:
         obstacle_content = self.read_asset(p.join('obstacles', obstacle_type + '.lua'))
         return obstacle_content
+
+
 
 asset_reader : AdServerAssetReader
 
@@ -281,10 +302,10 @@ class AdRequestHandler(BaseHTTPRequestHandler):
 
 
 
-def runAdServer(server_class, handler_class, asset_dir : str, default_level : Optional[str]):
+def runAdServer(server_class, handler_class, asset_dir : str, default_level : Optional[str], do_obstacle_loading : bool):
     global asset_reader
 
-    asset_reader = AdServerAssetReader(asset_dir, default_level)
+    asset_reader = AdServerAssetReader(asset_dir, default_level, do_obstacle_loading)
     server = server_class(("0.0.0.0", 8000), handler_class)
 
     print("Smash Hit level server running!")
@@ -298,14 +319,15 @@ def runAdServer(server_class, handler_class, asset_dir : str, default_level : Op
 
 def main():
     parser = ArgumentParser(prog='python ./levelserver.py', description='Smash Hit Assets Server by yorshex - SH server compatible with Shatter\'s quick test client')
-    parser.add_argument('asset_dir', metavar='assets-directory', help='SH asset directory')
-    parser.add_argument('-l', '--default-level', dest='default_level', metavar='default-level', help='level that will be accessible at https://localhost:8000/level by default, required for SHBT quick test client compatibility')
+    parser.add_argument('asset_dir', metavar='asset-directory', help='SH asset directory')
+    parser.add_argument('-l', '--default-level', dest='default_level', metavar='default-level', help='level that will be accessible at https://localhost:8000/level by default, required for compatibility with Shatter Client')
+    parser.add_argument('-o', '--obstacle-loading', dest='do_obstacle_loading', action='store_true', help='Load obstacles from asset directory. Requires Shatter Client version 3.3.0 or later')
 
     args = parser.parse_args()
 
     print('WARNING: BE CAREFUL WITH UNTRUSTED XML FILES!\nMORE DETAILS: https://docs.python.org/3/library/xml.html#xml-vulnerabilities\n')
 
-    runAdServer(HTTPServer, AdRequestHandler, p.join(os.getcwd(), args.asset_dir), args.default_level)
+    runAdServer(HTTPServer, AdRequestHandler, p.join(os.getcwd(), args.asset_dir), args.default_level, args.do_obstacle_loading)
 
 
 
