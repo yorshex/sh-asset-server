@@ -65,7 +65,7 @@ class AdServerAssetReader:
         return p.join(self.asset_dir, path + '.mp3')
 
     def _template_exists(self, name):
-        (name is not None) and (name in self._templates.keys())
+        return (name is not None) and (name in self._templates.keys())
 
 
     def read_asset(self, path : str) -> Optional[bytes]:
