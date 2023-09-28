@@ -26,7 +26,7 @@ freely, subject to the following restrictions:
 
 from argparse import ArgumentParser
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, HTTPStatus
 from urllib.parse import urlparse
 from urllib.parse import urljoin
 from urllib.parse import quote_plus as urlquote
@@ -34,6 +34,8 @@ from urllib.parse import parse_qs as parse_url_qs
 
 import os
 import os.path as p
+import sys
+import json # for json.dumps()
 
 from typing import Optional
 
@@ -50,6 +52,8 @@ re_mgSeg = re.compile(r'(\W|^)mgSegment(\W|$)')
 def path_is_readable(path):
     return p.exists(path) and p.isfile(path) and os.access(path, os.R_OK)
 
+def dquotes(s):
+    return json.dumps(s)
 
 
 class AdServerAssetReader:
@@ -252,6 +256,45 @@ class HTTPResponse:
 
 
 class AdRequestHandler(BaseHTTPRequestHandler):
+    def log_request(self, code='-', size='-'):
+        if isinstance(code, HTTPStatus):
+            code = code.value
+
+        kind = None
+        pv_string = ""
+
+        if self.command == "GET":
+            urlpath = urljoin('/', self._url.path)
+            if urlpath in ("/level", "/room", "/obstacle"):
+                kind = urlpath[1:]
+            elif urlpath == "/segment" and self._get_query("filetype") == ".xml":
+                kind = "segment"
+            elif urlpath == "/segment" and self._get_query("filetype") == ".mesh":
+                kind = "mesh"
+
+            if kind == "level" and asset_reader.default_level is not None:
+                type_string = dquotes(asset_reader.default_level) + ' (default)'
+            elif self._get_query("type") is not None:
+                type_string = dquotes(self._get_query("type"))
+            else:
+                type_string = '(unspecified)'
+
+            if self._get_query("pv") is not None:
+                pv_string = f', pv.{self._get_query("pv")}'
+
+        if kind is not None:
+            self.log_message('get %s %s%s (%s)', kind, type_string, pv_string, str(code))
+        else:
+            self.log_message('%s (%s)', dquotes(self.requestline), str(code))
+
+
+    def log_message(self, format, *args):
+        message = format % args
+        sys.stderr.write("[%s] %s: %s\n" %
+                         (self.log_date_time_string(),
+                          self.address_string(),
+                          message))
+
     def _send_response(self, response:HTTPResponse):
         self.send_response(response.status)
         response.generate_content_len()
