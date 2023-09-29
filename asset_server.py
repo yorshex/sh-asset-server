@@ -351,12 +351,12 @@ def runAdServer(server_class, handler_class, asset_dir : str, default_level : Op
     asset_reader = AdServerAssetReader(asset_dir, default_level, do_obstacle_loading)
     server = server_class(("0.0.0.0", 8000), handler_class)
 
-    print("Smash Hit level server running!")
+    print("Smash Hit asset server running!")
 
     try:
         server.serve_forever()
     except Exception as e:
-        print("Smash Hit level server is down:\n" + e)
+        print("Smash Hit asset server is down:\n" + e)
     except KeyboardInterrupt:
         print("Exiting...")
 
